@@ -1,4 +1,5 @@
 #include QMK_KEYBOARD_H
+#include "process_tap_dance.h"
 #include "version.h"
 #include "keymap_german.h"
 #include "keymap_nordic.h"
@@ -39,6 +40,31 @@
 #define LSA_T(kc) MT(MOD_LSFT | MOD_LALT, kc)
 #define BP_NDSH_MAC ALGR(KC_8)
 
+enum tap_dance_codes {
+    TD_SPACE,
+    TAP_DANCE_COUNT
+};
+
+void td_space_finished(tap_dance_state_t *state, void *user_data) {
+    if (state->count == 1) {
+        tap_code(KC_SPACE);
+    } else if (state->count == 2) {
+        tap_code(KC_KP_DOT);
+        tap_code(KC_SPACE);
+    }
+}
+
+void td_space_reset(tap_dance_state_t *state, void *user_data) {}
+
+uint16_t get_tapping_term(uint16_t keycode, keyrecord_t *record) {
+    switch (keycode) {
+        case TD(TD_SPACE):
+            return 60;
+        default:
+            return TAPPING_TERM;
+    }
+}
+
 enum custom_keycodes {
   RGB_SLD = EZ_SAFE_RANGE,
   HSV_172_255_255,
@@ -55,7 +81,7 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
     LT(1,KC_GRAVE), WEBUSB_PAIR,    LALT(KC_LSHIFT),KC_LEFT,        KC_RIGHT,                                                                                                       KC_UP,          KC_DOWN,        KC_LBRACKET,    KC_RBRACKET,    MO(1),
                                                                                                     LALT_T(KC_APPLICATION),KC_LGUI,        KC_LALT,        LCTL_T(KC_ESCAPE),
                                                                                                                     KC_HOME,        KC_PGUP,
-                                                                                    KC_SPACE,       KC_BSPACE,      KC_END,         KC_PGDOWN,      KC_TAB,         KC_ENTER
+                                                                                    TD(TD_SPACE),   KC_BSPACE,      KC_END,         KC_PGDOWN,      KC_TAB,         KC_ENTER
   ),
   [1] = LAYOUT_ergodox_pretty(
     KC_ESCAPE,      KC_F1,          KC_F2,          KC_F3,          KC_F4,          KC_F5,          KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_F6,          KC_F7,          KC_F8,          KC_F9,          KC_F10,         KC_F11,
@@ -89,6 +115,9 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
   ),
 };
 
+tap_dance_action_t tap_dance_actions[] = {
+    [TD_SPACE] = ACTION_TAP_DANCE_FN_ADVANCED(NULL, td_space_finished, td_space_reset)
+};
 
 bool process_record_user(uint16_t keycode, keyrecord_t *record) {
   switch (keycode) {
