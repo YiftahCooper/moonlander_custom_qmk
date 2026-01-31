@@ -11,12 +11,12 @@ on:
         description: "Keyboard type"
         type: choice
         options:
+          - moonlander
           - moonlander/reva
           - moonlander/revb
           - planck_ez
           - planck_ez/glow
-          - moonlander
-        default: moonlander/reva
+        default: moonlander
 
 permissions:
   contents: write
@@ -36,8 +36,13 @@ jobs:
         id: download-layout-source
         run: |
           # Use a clear GraphQL query to fetch version info
+          # We prefer the generic 'moonlander' geometry key if provided, as the API might handle revisions internally
+          GEOMETRY="${{ github.event.inputs.layout_geometry }}"
+          
+          echo "Fetching layout for Geometry: $GEOMETRY"
+          
           QUERY='query getLayout($hashId: String!, $revisionId: String!, $geometry: String!) { layout(hashId: $hashId, revisionId: $revisionId, geometry: $geometry) { revision { hashId, qmkVersion, changeDescription } } }'
-          VARIABLES="{\"hashId\":\"${{ github.event.inputs.layout_id }}\",\"revisionId\":\"latest\",\"geometry\":\"${{ github.event.inputs.layout_geometry }}\"}"
+          VARIABLES="{\"hashId\":\"${{ github.event.inputs.layout_id }}\",\"revisionId\":\"latest\",\"geometry\":\"$GEOMETRY\"}"
           
           # Construct JSON payload
           PAYLOAD=$(jq -n --arg q "$QUERY" --arg v "$VARIABLES" '{query: $q, variables: $v|fromjson}')
@@ -46,17 +51,18 @@ jobs:
           curl --location --silent --show-error 'https://oryx.zsa.io/graphql' \
             --header 'Content-Type: application/json' \
             --data "$PAYLOAD" > response.json
+            
+          # Debug: Print response
+          cat response.json
 
-          # Extract values using jq (safer than python one-liners)
-          # Use -r for raw output (no quotes around strings)
+          # Extract values using jq
           HASH_ID=$(jq -r '.data.layout.revision.hashId' response.json)
           FIRMWARE_VERSION=$(jq -r '.data.layout.revision.qmkVersion' response.json)
           CHANGE_DESC=$(jq -r '.data.layout.revision.changeDescription // "Manual build"' response.json)
 
           # Verify we got a hash (if null/empty, something went wrong)
           if [ "$HASH_ID" == "null" ] || [ -z "$HASH_ID" ]; then
-            echo "::error::Failed to retrieve Hash ID from Oryx response. Response content:"
-            cat response.json
+            echo "::error::Failed to retrieve Hash ID from Oryx response. Check that the Layout ID and Geometry match."
             exit 1
           fi
 
@@ -75,6 +81,19 @@ jobs:
           unzip -oj source.zip '*_source/*' -d ${{ github.event.inputs.layout_id }}
           rm source.zip
           rm -f response.json
+
+      - name: Validate Layout Type
+        run: |
+          # Check if the downloaded keymap matches the expected geometry
+          if grep -q "LAYOUT_ergodox" ${{ github.event.inputs.layout_id }}/keymap.c; then
+            echo "::error::Downloaded layout contains 'LAYOUT_ergodox' but expected Moonlander! The Layout ID might be incorrect or the API returned the wrong version."
+            # We don't exit 1 here to allow you to see the file, but we warn heavily
+            echo "WARNING: This appears to be an ErgoDox layout."
+          elif grep -q "LAYOUT_moonlander" ${{ github.event.inputs.layout_id }}/keymap.c; then
+             echo "SUCCESS: Verified 'LAYOUT_moonlander' in keymap.c"
+          else
+             echo "WARNING: Could not verify layout macro in keymap.c"
+          fi
 
       - name: Commit and Push changes
         env:
@@ -169,14 +188,22 @@ jobs:
 
           # Run Make inside Docker
           # We explicitly invoke 'qmk setup' to ensure the environment is correct
+          # Note: We use 'moonlander' generic folder name for build if input was moonlander
+          # But QMK expects 'moonlander' usually.
+          
+          # Map geometry input to QMK folder name if needed
+          # For Moonlander, it's just 'moonlander'
+          # We strip '/reva' etc for the make command if it's there
+          QMK_KEYBOARD_NAME=$(echo "${{ github.event.inputs.layout_geometry }}" | cut -d'/' -f1)
+          
           docker run --rm -v "$(pwd)/qmk_firmware:/qmk_firmware" qmk /bin/sh -c "
             qmk setup -y -H /qmk_firmware && \
-            make ${MAKE_PREFIX}${{ github.event.inputs.layout_geometry }}:${{ github.event.inputs.layout_id }}
+            make ${MAKE_PREFIX}${QMK_KEYBOARD_NAME}:${{ github.event.inputs.layout_id }}
           "
 
           # Find and Export Artifact
           NORMALIZED_GEOMETRY=$(echo "${{ github.event.inputs.layout_geometry }}" | sed 's/\//_/g')
-          BUILT_FILE=$(find ./qmk_firmware -type f -regex ".*${NORMALIZED_GEOMETRY}.*\.\(bin\|hex\)" -print -quit)
+          BUILT_FILE=$(find ./qmk_firmware -type f -regex ".*${QMK_KEYBOARD_NAME}.*\.\(bin\|hex\)" -print -quit)
           
           echo "built_layout_file=${BUILT_FILE}" >> "$GITHUB_OUTPUT"
           echo "normalized_layout_geometry=${NORMALIZED_GEOMETRY}" >> "$GITHUB_OUTPUT"
