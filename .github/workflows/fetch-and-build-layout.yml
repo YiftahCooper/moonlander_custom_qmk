@@ -96,6 +96,9 @@ jobs:
           WORKDIR /root
           EOF
 
+      - name: QMK setup 
+        run: qmk setup --yes
+
       - name: Build qmk docker image
         run: docker build -t qmk .
 
