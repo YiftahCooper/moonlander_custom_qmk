@@ -10,7 +10,7 @@ on:
       layout_geometry:
         description: "Keyboard type"
         type: choice
-        options: 
+        options:
           - moonlander/reva
           - moonlander/revb
           - planck_ez
@@ -43,9 +43,9 @@ jobs:
           if [[ -z "${change_description}" ]]; then
             change_description="latest layout modification made with Oryx"
           fi
-          
+
           curl -L "https://oryx.zsa.io/source/${hash_id}" -o source.zip
-          
+
           echo firmware_version=${firmware_version} >> "$GITHUB_OUTPUT"
           echo change_description=${change_description} >> "$GITHUB_OUTPUT"
 
@@ -81,8 +81,8 @@ jobs:
           git add qmk_firmware
           git commit -m "✨(qmk): Update firmware" || echo "No QMK change"
           git push
-     
-      - name: Create QMK Dockerfile (with ARM toolchain)
+
+      - name: Create QMK Dockerfile (with ARM toolchain and qmk CLI)
         run: |
           cat > Dockerfile <<'EOF'
           FROM ubuntu:22.04
@@ -91,14 +91,13 @@ jobs:
             && apt-get install -y --no-install-recommends \
               ca-certificates curl git build-essential python3 python3-pip \
               gcc-arm-none-eabi binutils-arm-none-eabi dfu-util unzip \
+            && pip3 install --no-cache-dir qmk \
             && apt-get clean \
             && rm -rf /var/lib/apt/lists/*
           WORKDIR /root
           EOF
 
-      - name: QMK setup 
-        run: qmk setup --yes
-
+      # Removed the failing runner-side "QMK setup" step here.
       - name: Build qmk docker image
         run: docker build -t qmk .
 
@@ -113,20 +112,24 @@ jobs:
             keyboard_directory="qmk_firmware/keyboards"
             make_prefix=""
           fi
-          
-          # Copy layout files to the qmk folder
-          rm -rf ${keyboard_directory}/${{ github.event.inputs.layout_geometry }}/keymaps/${{ github.event.inputs.layout_id }}
-          mkdir -p ${keyboard_directory}/${{ github.event.inputs.layout_geometry }}/keymaps && cp -r ${{ github.event.inputs.layout_id }} "$_"
-          
-          # Build the layout
-          docker run -v ./qmk_firmware:/root --rm qmk /bin/sh -c "
-            qmk setup zsa/qmk_firmware -b firmware${{ steps.download-layout-source.outputs.firmware_version }} -y
+
+          # Copy layout files to the qmk folder (explicit destination)
+          rm -rf "${keyboard_directory}/${{ github.event.inputs.layout_geometry }}/keymaps/${{ github.event.inputs.layout_id }}"
+          mkdir -p "${keyboard_directory}/${{ github.event.inputs.layout_geometry }}/keymaps"
+          cp -r "${{ github.event.inputs.layout_id }}" "${keyboard_directory}/${{ github.event.inputs.layout_geometry }}/keymaps/${{ github.event.inputs.layout_id }}"
+
+          # Build the layout inside the Docker image
+          # mount the qmk_firmware directory inside the container at /qmk_firmware
+          docker run -v "$(pwd)/qmk_firmware:/qmk_firmware" --rm qmk /bin/sh -c "
+            cd /qmk_firmware
             make ${make_prefix}${{ github.event.inputs.layout_geometry }}:${{ github.event.inputs.layout_id }}
           "
-          
-          # Find and export built layout          
+
+          # Find and export built layout
           normalized_layout_geometry="$(echo "${{ github.event.inputs.layout_geometry }}" | sed 's/\//_/g')"
-          echo built_layout_file=$(find ./qmk_firmware -maxdepth 1 -type f -regex ".*${normalized_layout_geometry}.*\.\(bin\|hex\)$") >> "$GITHUB_OUTPUT"
+          # search recursively for produced .bin/.hex matching the geometry
+          built_file=$(find ./qmk_firmware -type f -regex ".*${normalized_layout_geometry}.*\.\(bin\|hex\)" -print -quit || true)
+          echo built_layout_file=${built_file} >> "$GITHUB_OUTPUT"
           echo normalized_layout_geometry=${normalized_layout_geometry} >> "$GITHUB_OUTPUT"
 
       - name: Upload layout
