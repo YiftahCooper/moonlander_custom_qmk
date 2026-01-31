@@ -10,7 +10,7 @@ on:
       layout_geometry:
         description: "Keyboard type"
         type: choice
-        options: 
+        options:
           - moonlander/reva
           - moonlander/revb
           - planck_ez
@@ -29,70 +29,113 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: oryx
-
-      - name: Download the full history for the merge to work correctly
-        run: git pull --unshallow
+          fetch-depth: 0
 
       - name: Download layout source
         id: download-layout-source
         run: |
-          response=$(curl --location 'https://oryx.zsa.io/graphql' --header 'Content-Type: application/json' --data '{"query":"query getLayout($hashId: String!, $revisionId: String!, $geometry: String) {layout(hashId: $hashId, geometry: $geometry, revisionId: $revisionId) {  revision { hashId, qmkVersion, title }}}","variables":{"hashId":"${{ github.event.inputs.layout_id }}","geometry":"${{ github.event.inputs.layout_geometry }}","revisionId":"latest"}}' | jq '.data.layout.revision | [.hashId, .qmkVersion, .title]')
-          hash_id=$(echo "${response}" | jq -r '.[0]')
-          firmware_version=$(printf "%.0f" $(echo "${response}" | jq -r '.[1]'))
-          change_description=$(echo "${response}" | jq -r '.[2]')
-          if [[ -z "${change_description}" ]]; then
-            change_description="latest layout modification made with Oryx"
-          fi
+          # Use a clear GraphQL query to fetch version info
+          QUERY='query getLayout($hashId: String!, $revisionId: String!, $geometry: String!) { layout(hashId: $hashId, revisionId: $revisionId, geometry: $geometry) { revision { hashId, qmkVersion, changeDescription } } }'
+          VARIABLES="{\"hashId\":\"${{ github.event.inputs.layout_id }}\",\"revisionId\":\"latest\",\"geometry\":\"${{ github.event.inputs.layout_geometry }}\"}"
           
-          curl -L "https://oryx.zsa.io/source/${hash_id}" -o source.zip
+          # We use jq to construct the JSON payload correctly to avoid quoting issues
+          PAYLOAD=$(jq -n --arg q "$QUERY" --arg v "$VARIABLES" '{query: $q, variables: $v|fromjson}')
           
-          echo firmware_version=${firmware_version} >> "$GITHUB_OUTPUT"
-          echo change_description=${change_description} >> "$GITHUB_OUTPUT"
+          RESPONSE=$(curl --location --silent --show-error 'https://oryx.zsa.io/graphql' \
+            --header 'Content-Type: application/json' \
+            --data "$PAYLOAD")
+
+          # Parse with Python for reliability
+          echo "$RESPONSE" | python3 -c "
+          import sys, json
+          try:
+              data = json.load(sys.stdin)
+              rev = data['data']['layout']['revision']
+              print(f\"firmware_version={int(rev['qmkVersion'])}\")
+              print(f\"change_description={rev['changeDescription'] or 'Manual build'}\")
+              print(f\"hash_id={rev['hashId']}\")
+          except Exception as e:
+              print(f\"Error parsing Oryx response: {e}\", file=sys.stderr)
+              # Fallback to defaults if API fails
+              print('firmware_version=24')
+              print('change_description=Fallback build')
+              print('hash_id=${{ github.event.inputs.layout_id }}')
+          " >> "$GITHUB_OUTPUT"
+
+          # Download the source zip
+          curl -L "https://oryx.zsa.io/source/${{ github.event.inputs.layout_id }}" -o source.zip
+
       - name: Unzip the source file
         run: |
           unzip -oj source.zip '*_source/*' -d ${{ github.event.inputs.layout_id }}
           rm source.zip
+
       - name: Commit and Push changes
         env:
           CHANGE_DESCRIPTION: ${{ steps.download-layout-source.outputs.change_description }}
         run: |
-          git config --local user.name "github-actions"
-          git config --local user.email "github-actions@github.com"
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .
-          printf "✨(oryx): %s\n" "$CHANGE_DESCRIPTION" | git commit -F - || echo "No layout change"
-          git push
+          git commit -m "✨(oryx): $CHANGE_DESCRIPTION" || echo "No layout change"
+          git push origin oryx
+
       - name: Merge Oryx with custom QMK
         run: |
           git fetch origin main
           git checkout -B main origin/main
           git merge -Xignore-all-space oryx
-          git push
-      - name: Update QMK firmware submodule to latest version (${{ steps.download-layout-source.outputs.firmware_version }})
+          git push origin main
+
+      - name: Update QMK firmware submodule (ZSA Fork)
         run: |
+          # Initialize submodule
           git submodule update --init --remote --depth=1 --no-single-branch
+          
           cd qmk_firmware
-          git checkout -B firmware${{ steps.download-layout-source.outputs.firmware_version }} origin/firmware${{ steps.download-layout-source.outputs.firmware_version }}
+          # ENSURE ZSA FORK: Explicitly set remote to ZSA to be safe
+          git remote set-url origin https://github.com/zsa/qmk_firmware.git
+          git fetch origin
+          
+          # Checkout the specific firmware branch (e.g., firmware24) used by this layout version
+          TARGET_BRANCH="firmware${{ steps.download-layout-source.outputs.firmware_version }}"
+          echo "Checking out ZSA branch: $TARGET_BRANCH"
+          
+          git checkout -B "$TARGET_BRANCH" "origin/$TARGET_BRANCH" || {
+            echo "Branch $TARGET_BRANCH not found, falling back to default branch."
+            git checkout -B firmware24 origin/firmware24 || git checkout master
+          }
+          
           git submodule update --init --recursive
           cd ..
+          
+          # Commit the submodule update to main
           git add qmk_firmware
-          git commit -m "✨(qmk): Update firmware" || echo "No QMK change"
-          git push
-     
-      - name: Create QMK Dockerfile (with ARM toolchain)
+          git commit -m "✨(qmk): Update firmware to $TARGET_BRANCH" || echo "No QMK change"
+          git push origin main
+
+      - name: Create QMK Dockerfile
         run: |
           cat > Dockerfile <<'EOF'
           FROM ubuntu:22.04
           ENV DEBIAN_FRONTEND=noninteractive
-          RUN apt-get update \
-            && apt-get install -y --no-install-recommends \
+          
+          # Install toolchain and basic dependencies
+          RUN apt-get update && apt-get install -y --no-install-recommends \
               ca-certificates curl git build-essential python3 python3-pip \
               gcc-arm-none-eabi binutils-arm-none-eabi dfu-util unzip \
-            && apt-get clean \
-            && rm -rf /var/lib/apt/lists/*
-          WORKDIR /root
+              libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib \
+            && apt-get clean && rm -rf /var/lib/apt/lists/*
+          
+          # Copy requirements from the submodule (must be in build context)
+          COPY qmk_firmware/requirements.txt /tmp/requirements.txt
+          
+          # Install QMK CLI and firmware requirements
+          RUN pip3 install --no-cache-dir qmk && \
+              pip3 install --no-cache-dir -r /tmp/requirements.txt
+          
+          WORKDIR /qmk_firmware
           EOF
-      - name: QMK setup 
-        run: qmk setup --yes
 
       - name: Build qmk docker image
         run: docker build -t qmk .
@@ -100,30 +143,40 @@ jobs:
       - name: Build the layout
         id: build-layout
         run: |
-          # Set keyboard directory and make prefix based on firmware version
-          if [ "${{ steps.download-layout-source.outputs.firmware_version }}" -ge 24 ]; then
-            keyboard_directory="qmk_firmware/keyboards/zsa"
-            make_prefix="zsa/"
+          FIRMWARE_VERSION="${{ steps.download-layout-source.outputs.firmware_version }}"
+          
+          # Dynamic path selection based on ZSA firmware versioning
+          if [ "$FIRMWARE_VERSION" -ge 24 ]; then
+            KEYBOARD_DIR="qmk_firmware/keyboards/zsa"
+            MAKE_PREFIX="zsa/"
           else
-            keyboard_directory="qmk_firmware/keyboards"
-            make_prefix=""
+            KEYBOARD_DIR="qmk_firmware/keyboards"
+            MAKE_PREFIX=""
           fi
           
-          # Copy layout files to the qmk folder
-          rm -rf ${keyboard_directory}/${{ github.event.inputs.layout_geometry }}/keymaps/${{ github.event.inputs.layout_id }}
-          mkdir -p ${keyboard_directory}/${{ github.event.inputs.layout_geometry }}/keymaps && cp -r ${{ github.event.inputs.layout_id }} "$_"
-          
-          # Build the layout
-          docker run -v ./qmk_firmware:/root --rm qmk /bin/sh -c "
-            qmk setup zsa/qmk_firmware -b firmware${{ steps.download-layout-source.outputs.firmware_version }} -y
-            make ${make_prefix}${{ github.event.inputs.layout_geometry }}:${{ github.event.inputs.layout_id }}
+          echo "Using keyboard directory: $KEYBOARD_DIR"
+
+          # Prepare Layout Directory
+          mkdir -p "${KEYBOARD_DIR}/${{ github.event.inputs.layout_geometry }}/keymaps"
+          rm -rf "${KEYBOARD_DIR}/${{ github.event.inputs.layout_geometry }}/keymaps/${{ github.event.inputs.layout_id }}"
+          cp -r "${{ github.event.inputs.layout_id }}" "${KEYBOARD_DIR}/${{ github.event.inputs.layout_geometry }}/keymaps/${{ github.event.inputs.layout_id }}"
+
+          # Run Make inside Docker
+          # We explicitly invoke 'qmk setup' to ensure the environment is correct
+          docker run --rm -v "$(pwd)/qmk_firmware:/qmk_firmware" qmk /bin/sh -c "
+            qmk setup -y -H /qmk_firmware && \
+            make ${MAKE_PREFIX}${{ github.event.inputs.layout_geometry }}:${{ github.event.inputs.layout_id }}
           "
+
+          # Find and Export Artifact
+          NORMALIZED_GEOMETRY=$(echo "${{ github.event.inputs.layout_geometry }}" | sed 's/\//_/g')
+          BUILT_FILE=$(find ./qmk_firmware -type f -regex ".*${NORMALIZED_GEOMETRY}.*\.\(bin\|hex\)" -print -quit)
           
-          # Find and export built layout          
-          normalized_layout_geometry="$(echo "${{ github.event.inputs.layout_geometry }}" | sed 's/\//_/g')"
-          echo built_layout_file=$(find ./qmk_firmware -maxdepth 1 -type f -regex ".*${normalized_layout_geometry}.*\.\(bin\|hex\)$") >> "$GITHUB_OUTPUT"
-          echo normalized_layout_geometry=${normalized_layout_geometry} >> "$GITHUB_OUTPUT"
+          echo "built_layout_file=${BUILT_FILE}" >> "$GITHUB_OUTPUT"
+          echo "normalized_layout_geometry=${NORMALIZED_GEOMETRY}" >> "$GITHUB_OUTPUT"
+
       - name: Upload layout
+        if: steps.build-layout.outputs.built_layout_file != ''
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.build-layout.outputs.normalized_layout_geometry }}_${{ github.event.inputs.layout_id }}
