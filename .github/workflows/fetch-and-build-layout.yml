@@ -30,13 +30,23 @@ jobs:
         with:
           ref: oryx
 
+      - name: Install build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential gcc-avr avr-libc gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi \
+            dfu-util unzip ca-certificates curl git python3 python3-pip jq \
+            && sudo apt-get clean \
+            && sudo rm -rf /var/lib/apt/lists/*
+
       - name: Download the full history for the merge to work correctly
         run: git pull --unshallow
 
       - name: Download layout source
         id: download-layout-source
         run: |
-          response=$(curl --location 'https://oryx.zsa.io/graphql' --header 'Content-Type: application/json' --data '{"query":"query getLayout($hashId: String!, $revisionId: String!, $geometry: String) {layout(hashId: $hashId, geometry: $geometry, revisionId: $revisionId) {  revision { hashId, qmkVersion, title }}}","variables":{"hashId":"${{ github.event.inputs.layout_id }}","geometry":"${{ github.event.inputs.layout_geometry }}","revisionId":"latest"}}' | jq '.data.layout.revision | [.hashId, .qmkVersion, .title]')
+          response=$(curl --location 'https://oryx.zsa.io/graphql' --header 'Content-Type: application/json' --data '{"query":"query getLayout($hashId: String!, $revisionId: String!, $geometry: St[...]')
           hash_id=$(echo "${response}" | jq -r '.[0]')
           firmware_version=$(printf "%.0f" $(echo "${response}" | jq -r '.[1]'))
           change_description=$(echo "${response}" | jq -r '.[2]')
@@ -128,7 +138,7 @@ jobs:
           # Find and export built layout
           normalized_layout_geometry="$(echo "${{ github.event.inputs.layout_geometry }}" | sed 's/\//_/g')"
           # search recursively for produced .bin/.hex matching the geometry
-          built_file=$(find ./qmk_firmware -type f -regex ".*${normalized_layout_geometry}.*\.\(bin\|hex\)" -print -quit || true)
+          built_file=$(find ./qmk_firmware -type f -regex ".*${normalized_layout_geometry}.*\.(bin|hex)" -print -quit || true)
           echo built_layout_file=${built_file} >> "$GITHUB_OUTPUT"
           echo normalized_layout_geometry=${normalized_layout_geometry} >> "$GITHUB_OUTPUT"
 
