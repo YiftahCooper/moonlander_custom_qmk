@@ -71,6 +71,8 @@ jobs:
             MAKE_TARGET="moonlander"
           fi
           
+          echo "Target Directory: $BASE_KB_DIR/moonlander/keymaps"
+          
           # Ensure target directory exists
           mkdir -p "$BASE_KB_DIR/moonlander/keymaps"
           
@@ -79,14 +81,29 @@ jobs:
           rm -rf "$BASE_KB_DIR/moonlander/keymaps/3aMQz"
           cp -r 3aMQz "$BASE_KB_DIR/moonlander/keymaps/3aMQz"
           
+          # Debug: List contents of destination
+          ls -R "$BASE_KB_DIR/moonlander/keymaps/3aMQz"
+          
           echo "Compiling..."
+          # Fix: removed 'zsa/' prefix for make target if firmware < 24 logic, 
+          # but sticking to inputs.firmware_version logic above.
+          # The make command needs to be relative to the keyboard folder structure if running from root.
+          # qmk compile command is safer than raw make.
+          
           docker run --rm -v "$(pwd)/qmk_firmware:/qmk_firmware" qmk /bin/sh -c "
             qmk setup -y -H /qmk_firmware && \
             make ${MAKE_TARGET}:3aMQz
           "
           
           # Find artifact
+          # Note: ZSA firmware often outputs to the root or specialized folder
           BUILT_FILE=$(find ./qmk_firmware -type f -regex ".*moonlander.*\.\(bin\|hex\)" -print -quit)
+          
+          if [ -z "$BUILT_FILE" ]; then
+            echo "::error::Build artifact not found!"
+            exit 1
+          fi
+          
           echo "built_file=$BUILT_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Upload Firmware
